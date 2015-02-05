@@ -1,14 +1,10 @@
 package main
 
 import (
-	"bitbucket.org/ckvist/twilio/twiml"
-	"fmt"
 	"time"
 	"os"
-//	"io"
 	"net/http"
 	"github.com/op/go-logging"
-	//"github.com/ajg/form"
 	"github.com/monoculum/formam"
 )
 
@@ -16,6 +12,7 @@ var log = logging.MustGetLogger("cf")
 var format = logging.MustStringFormatter(
 	"%{color}%{time:15:04:05.000} %{shortfunc:20.20s} %{level:.4s} %{id:03x}%{color:reset} %{message}",
 )
+
 
 type Number struct {
 	CallNumber string
