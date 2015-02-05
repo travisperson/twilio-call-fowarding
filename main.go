@@ -3,7 +3,9 @@ package main
 import (
 	"bitbucket.org/ckvist/twilio/twiml"
 	"fmt"
+	"time"
 	"os"
+//	"io"
 	"net/http"
 	"github.com/op/go-logging"
 	//"github.com/ajg/form"
@@ -12,230 +14,134 @@ import (
 
 var log = logging.MustGetLogger("cf")
 var format = logging.MustStringFormatter(
-    "%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}",
+	"%{color}%{time:15:04:05.000} %{shortfunc:20.20s} %{level:.4s} %{id:03x}%{color:reset} %{message}",
 )
 
-func NewScreen () *twiml.Response {
-	screen := twiml.NewResponse()
-	screen.Gather(
-		twiml.Gather{
-			Action: "/complete",
-		},
-		twiml.Say{
-			Text: "Press any key to accept",
-		})
-	screen.Response = append(screen.Response, twiml.Hangup{})
-
-	return screen
+type Number struct {
+	CallNumber string
+	StartTime time.Time
+	EndTime time.Time
 }
 
-func NewComplete () *twiml.Response {
-	complete := twiml.NewResponse()
-	complete.Action(
-		twiml.Say{
-			Text:"Connecting",
-		})
-
-	return complete
+type CallForwardService struct {
+	Numbers []Number
+	ActiveCalls map[string] *Call
 }
 
-func NewDial (number string) *twiml.Response {
-	call := twiml.NewResponse()
-	call.Dial(
-		twiml.Dial{
-			Action: fmt.Sprintf("/call"),
-		},
-		twiml.Number{
-			Url:"/screen",
-			Number: number,
-		})
+func (cfs * CallForwardService) GetShiftNumbers () []Number {
+	nums := make([]Number, 0, 100)
+	
+	log.Debug("Shift Numbers:")
+
+	t := time.Now()
+	for _, n := range cfs.Numbers {
+		if t.After(n.StartTime) && t.Before(n.EndTime) {
+			log.Debug(" %s", n.CallNumber)
+			nums = append(nums, n)
+		}
+	}
+
+	return nums
+}
+
+func (cfs * CallForwardService) GetCall (r * http.Request) *Call {
+
+	sid := r.Header.Get("X-Twilio-CallSid")
+
+	call, ok := cfs.ActiveCalls[sid]
+
+	if !ok {
+		call = cfs.NewCall(r)
+	} else {
+		var tcall TwimlCall
+
+		r.ParseForm()
+		if err := formam.Decode(r.Form, &tcall); err != nil {
+			log.Error("%s", err)
+		}
+		call.CurrentInfo = tcall
+	}
 
 	return call
 }
 
-func NewHangup () *twiml.Response {
-	hangup := twiml.NewResponse()
-	hangup.Action(
-		twiml.Hangup{
-		})
+func (cfs * CallForwardService) NewCall (r * http.Request) *Call {
 
-	return hangup
-}
+	var tcall TwimlCall
 
-func NewNoNumbers () *twiml.Response {
-	hangup := twiml.NewResponse()
-	hangup.Action(
-		twiml.Say{Text: "No available coordinators"})
-	hangup.Response = append(hangup.Response, twiml.Hangup{})
-
-	return hangup
-}
-
-type CallForward struct {
-	Numbers []string
-	ActiveCalls map[string]bool
-	next_caller map[string]int
-}
-
-type TwimlCall struct {
-	CallStatus string
-	DialStatus string
-	CalledVia string
-	Digits string
-
-	Msg string `formam:"msg"`
-
-	Called string
-	CalledZip string
-	CalledCity string
-	CalledState string
-	CalledCountry string
-
-	Caller string
-	CallerState string
-	CallerCity string
-	CallerZip string
-	CallerCountry string
-
-	ApiVersion string
-
-	Duration int
-	DialCallDuration int
-	CallDuration int
-
-	CallSid string
-	CallGuid string
-
-	AccountSid string
-	AccountGuid string
-
-	SegmentGuid string
-	CallSegmentGuid string
-}
-
-type Call struct {
-	TwimlCall
-	Active bool
-	cf * CallForward
-
-}
-
-func (c * Call) CallCompleted () bool {
-	return c.CallStatus == "completed"
-}
-
-func (c * Call) InProgress () bool {
-	return c.Active
-}
-
-func (c * Call) End() {
-	c.Active = false
-	c.cf.next_caller[c.CallSid] = 0
-	c.cf.ActiveCalls[c.CallSid] = false
-}
-
-func (c * Call) DialNext() bool {
-	return c.CallCompleted() == false && c.DialCallDuration == 0
-}
-
-func (c * Call) NewCaller() bool {
-	return c.CallCompleted() == false && c.InProgress() == false
-}
-
-func (c * Call) EndOfCall() bool {
-	 return (c.CallCompleted() || c.DialCallDuration != 0) && c.InProgress() == true
-}
-
-func (c * Call) GetNextNumber() string {
-	next := c.cf.Numbers[c.cf.next_caller[c.CallSid]]
-	c.cf.next_caller[c.CallSid] += 1
-	return next
-}
-
-func (cf * CallForward) SetActive(c * Call) {
-	cf.ActiveCalls[c.CallSid] = true
-	cf.next_caller[c.CallSid] = 0
-	c.Active = true
-}
-
-func (cf * CallForward) DialNext(c * Call) bool {
-	return c.DialNext() == true && cf.next_caller[c.CallSid] < len(cf.Numbers)
-}
-
-func (c * Call) EndOfList() bool {
-	return c.cf.next_caller[c.CallSid] == len(c.cf.Numbers)
-}
-
-func (cf * CallForward) GetCall(r * http.Request) *Call {
-	call := new(Call)
 	r.ParseForm()
-	if err := formam.Decode(r.Form, call); err != nil {
-		fmt.Println(err)
+	if err := formam.Decode(r.Form, &tcall); err != nil {
+		log.Error("%s", err)
 	}
 
-	call.cf = cf
+	c := new(Call)
 
-	call.Active = cf.ActiveCalls[call.CallSid]
+	c.Numbers = cfs.GetShiftNumbers()
+	c.NumberIndex = 0
+	c.CallSid = tcall.CallSid
+	c.Caller = tcall.Caller
+	c.OriginalCall = tcall
+	c.CurrentInfo = tcall
 
+	cfs.ActiveCalls[c.CallSid] = c
 
-	return call
+	return c
 }
 
+func (cfs * CallForwardService) HandleCall(w http.ResponseWriter, r *http.Request) {
+	call := cfs.GetCall(r)
 
-func (c * CallForward) HandleCall(w http.ResponseWriter, r *http.Request) {
-	call := c.GetCall(r)
-
-	if call.NewCaller() {
-		log.Debug("Incoming call from %s", call.Caller)
-		c.SetActive(call)
+	if call.NewCall() {
+		log.Info("[%s] Incoming call from %s", call.CallSid, call.Caller)
+	}
+	
+	// The connected call has ended
+	if call.CallForwardEnded() == true {
+		log.Info("Call Forward Ended")
+		return;
 	}
 
-	if call.DialNext() {
-		next_dial := call.GetNextNumber()
-		log.Info("Dialing %s", next_dial)
-		dial := NewDial(next_dial)
-		dial.Send(w)
-	else if call.EndOfCall() {
-		log.Info("Call ended")
+	// Caller has hungup
+	if call.EndOfCall() {
+		log.Info("[%s] Call ended", call.CallSid)
 
 		hangup := NewHangup()
 		hangup.Send(w)
 
-		call.End()
-	} else if call.EndOfList() {
-		log.Info("Out of Numbers")
+		//call.End()
+	} else {
+		if !call.EndOfNumbers() {
+			next_dial := call.GetNextNumber()
+			log.Info("[%s] Dialing %s", call.CallSid, next_dial)
 
-		hangup := NewNoNumbers()
-		hangup.Send(w)
+			dial := NewDial(next_dial)
+			dial.Send(w)
+		} else {
+			log.Info("[%s] Out of Numbers", call.CallSid)
+
+			hangup := NewNoNumbers()
+			hangup.Send(w)
+		}
 	}
 }
 
-func (c CallForward) HandleScreen(w http.ResponseWriter, r *http.Request) {
-	call := new(Call)
-	r.ParseForm()
-	if err := formam.Decode(r.Form, call); err != nil {
-		fmt.Println(err)
-	}
+func (cfs CallForwardService) HandleScreen(w http.ResponseWriter, r *http.Request) {
+	call := cfs.GetCall(r)
 
-	log.Debug("Attempting to connect %s with %s", call.Caller, call.Called)
+	log.Info("[%s] Attempting to connect %s with %s", call.CallSid, call.CurrentInfo.Caller, call.CurrentInfo.Called)
 
 	screen := NewScreen()
 	screen.Send(w)
 }
 
-func (c CallForward) HandleComplete(w http.ResponseWriter, r *http.Request) {
-	call := new(Call)
-	r.ParseForm()
-	if err := formam.Decode(r.Form, call); err != nil {
-		fmt.Println(err)
-	}
+func (cfs CallForwardService) HandleComplete(w http.ResponseWriter, r *http.Request) {
+	call := cfs.GetCall(r)
 
-	log.Debug("Call connected %s to %s", call.Caller, call.Called)
+	log.Info("[%s] Call connected %s to %s", call.CallSid, call.CurrentInfo.Caller, call.CurrentInfo.Called)
 
 	complete := NewComplete()
 	complete.Send(w)
 }
-
 
 func main () {
 
@@ -244,15 +150,23 @@ func main () {
     backendFormatter := logging.NewBackendFormatter(backend, format)
 	logging.SetBackend(backendFormatter)
 
-	cf := new(CallForward)
-	cf.Numbers = make([]string, 1, 10)
-	cf.ActiveCalls = make(map[string]bool)
-	cf.next_caller = make(map[string]int)
-	cf.Numbers[0] = "5095912174"
+	cfs := new(CallForwardService)
+	cfs.Numbers = make([]Number, 0, 10)
+	cfs.ActiveCalls = make(map[string]*Call)
 
-	http.HandleFunc("/call", cf.HandleCall)
-	http.HandleFunc("/screen", cf.HandleScreen)
-	http.HandleFunc("/complete", cf.HandleComplete)
+	t := time.Now()
+
+	nb := Number{"5095912174", t, t.Add(time.Hour)}
+	cfs.Numbers = append(cfs.Numbers, nb)
+
+	/*
+	nb = Number{"5090000000", t.Add((-1) * time.Hour), t}
+	cfs.Numbers = append(cfs.Numbers, nb)
+	*/
+
+	http.HandleFunc("/call", cfs.HandleCall)
+	http.HandleFunc("/screen", cfs.HandleScreen)
+	http.HandleFunc("/complete", cfs.HandleComplete)
 
 	http.ListenAndServe(":8090", nil)
 
